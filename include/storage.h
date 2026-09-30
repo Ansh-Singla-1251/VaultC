@@ -32,10 +32,16 @@ typedef struct
     char magic[5];
     uint8_t version;
     uint32_t header_size;
+
     uint64_t index_offset;
     uint64_t index_size;
     uint64_t data_offset;
+
     uint32_t file_count;
+
+    uint8_t password_salt[16];
+    uint8_t password_hash[32];
+
 } VaultHeader;
 
 int read_file_index(

@@ -64,13 +64,28 @@ int handle_command(int argc, char *argv[])
         return list_vault(argv[2]) ? 0 : 1;
     }
     else if (strcmp(argv[1], "remove") == 0) {
-        printf("REMOVE command selected\n");
+        if (argc != 4){
+            printf("Usage: vault remove <vault> <filename>\n");
+            return 1;
+        }
+        return remove_file(argv[2], argv[3]) ? 0 : 1;
     }
-    else if (strcmp(argv[1], "rename") == 0) {
-        printf("RENAME command selected\n");
+    else if(strcmp(argv[1], "rename") == 0){
+        if (argc != 5)
+        {
+            printf("Usage: vault rename <vault> <old_name> <new_name>\n");
+            return 1;
+        }
+
+        return rename_file(argv[2], argv[3], argv[4]) ? 0 : 1;
+    
     }
-    else if (strcmp(argv[1], "search") == 0) {
-        printf("SEARCH command selected\n");
+   else if (strcmp(argv[1], "search") == 0){
+        if (argc != 4){
+            printf("Usage: vault search <vault> <query>\n");
+            return 1;
+        }
+        return search_files(argv[2], argv[3]) ? 0 : 1;
     }
     else if (strcmp(argv[1], "verify") == 0) {
         printf("VERIFY command selected\n");
