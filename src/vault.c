@@ -1,6 +1,7 @@
 #include <stdio.h>
-#include <string.h>
 #include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -8,325 +9,313 @@
 #include "../include/storage.h"
 #include "../include/crypto.h"
 
-
-static int read_password(const char *prompt,
-                         char *password,
-                         size_t size)
-{
-    if (password == NULL || size == 0)
-        return 0;
+static int read_password(const char *prompt, char *password, size_t size){
+    struct termios old_settings;
+    struct termios new_settings;
 
     printf("%s", prompt);
     fflush(stdout);
 
-    struct termios old_terminal;
-    struct termios new_terminal;
-
-    if (tcgetattr(STDIN_FILENO, &old_terminal) != 0)
+    if(tcgetattr(STDIN_FILENO, &old_settings) != 0)
         return 0;
 
-    new_terminal = old_terminal;
+    new_settings = old_settings;
+    new_settings.c_lflag &= ~(ECHO);
 
-    new_terminal.c_lflag &= ~(ECHO);
+    if(tcsetattr(STDIN_FILENO, TCSANOW, &new_settings) != 0)
+        return 0;
 
-    if (tcsetattr(STDIN_FILENO,
-                  TCSANOW,
-                  &new_terminal) != 0)
-    {
+    if(fgets(password, size, stdin) == NULL){
+        tcsetattr(STDIN_FILENO, TCSANOW, &old_settings);
         return 0;
     }
 
-    if (fgets(password, size, stdin) == NULL)
-    {
-        tcsetattr(STDIN_FILENO,
-                   TCSANOW,
-                   &old_terminal);
-
-        return 0;
-    }
-
-    tcsetattr(STDIN_FILENO,
-               TCSANOW,
-               &old_terminal);
-
+    tcsetattr(STDIN_FILENO, TCSANOW, &old_settings);
     printf("\n");
 
     password[strcspn(password, "\n")] = '\0';
 
-    return strlen(password) > 0;
+    return 1;
 }
 
-
-int create_vault(const char *path)
-{
-    if (path == NULL)
-        return 0;
-
-    FILE *file = fopen(path, "wb");
-
-    if (file == NULL)
-    {
-        perror("Failed to create vault");
-        return 0;
-    }
-
-    VaultHeader header = {0};
-
-    /*
-     * Ask user for password.
-     */
+static int load_vault_key(FILE *file, VaultHeader *header, uint8_t *vault_key){
     char password[256];
-    char confirm_password[256];
+    uint8_t password_key[VAULT_KEY_SIZE];
 
-    if (!read_password(
-            "Enter vault password: ",
-            password,
-            sizeof(password)))
-    {
-        fclose(file);
+    if(file == NULL || header == NULL || vault_key == NULL)
         return 0;
-    }
 
-    if (!read_password(
-            "Confirm vault password: ",
-            confirm_password,
-            sizeof(confirm_password)))
-    {
+    if(!read_password("Enter vault password: ", password, sizeof(password)))
+        return 0;
+
+    if(!derive_key(password, header->password_salt, sizeof(header->password_salt), password_key, sizeof(password_key))){
         memset(password, 0, sizeof(password));
-
-        fclose(file);
+        memset(password_key, 0, sizeof(password_key));
         return 0;
     }
 
-    if (strcmp(password, confirm_password) != 0)
-    {
-        printf("Passwords do not match.\n");
-
+    if(!verify_password(password, header->password_salt, sizeof(header->password_salt), header->password_hash, sizeof(header->password_hash))){
+        printf("Incorrect password.\n");
         memset(password, 0, sizeof(password));
-        memset(confirm_password, 0, sizeof(confirm_password));
-
-        fclose(file);
-
+        memset(password_key, 0, sizeof(password_key));
         return 0;
     }
 
-    /*
-     * Generate a unique random salt.
-     */
-    if (!generate_salt(
-            header.password_salt,
-            sizeof(header.password_salt)))
-    {
+    if(!decrypt_vault_key(header->encrypted_vault_key, password_key, header->vault_key_nonce, vault_key)){
+        printf("Vault key authentication failed.\n");
         memset(password, 0, sizeof(password));
-        memset(confirm_password, 0, sizeof(confirm_password));
-
-        fclose(file);
-
+        memset(password_key, 0, sizeof(password_key));
         return 0;
     }
 
-    /*
-     * Derive a 32-byte password verification value
-     * using Argon2id.
-     */
-    if (!derive_key(
-            password,
-            header.password_salt,
-            sizeof(header.password_salt),
-            header.password_hash,
-            sizeof(header.password_hash)))
-    {
-        memset(password, 0, sizeof(password));
-        memset(confirm_password, 0, sizeof(confirm_password));
-
-        fclose(file);
-
-        return 0;
-    }
-
-    /*
-     * Password is no longer needed.
-     */
     memset(password, 0, sizeof(password));
-    memset(confirm_password, 0, sizeof(confirm_password));
+    memset(password_key, 0, sizeof(password_key));
 
-    /*
-     * Initialize vault metadata.
-     */
-    memcpy(header.magic, VAULT_MAGIC, 5);
+    return 1;
+}
 
+static int get_file_size(FILE *file, uint64_t *size){
+    long current_position;
+    long end_position;
+
+    if(file == NULL || size == NULL)
+        return 0;
+
+    current_position = ftell(file);
+
+    if(current_position < 0)
+        return 0;
+
+    if(fseek(file, 0, SEEK_END) != 0)
+        return 0;
+
+    end_position = ftell(file);
+
+    if(end_position < 0)
+        return 0;
+
+    if(fseek(file, current_position, SEEK_SET) != 0)
+        return 0;
+
+    *size = (uint64_t)end_position;
+
+    return 1;
+}
+
+static const char *get_filename(const char *path){
+    const char *slash;
+    const char *backslash;
+
+    slash = strrchr(path, '/');
+    backslash = strrchr(path, '\\');
+
+    if(slash != NULL && backslash != NULL)
+        return slash > backslash ? slash + 1 : backslash + 1;
+
+    if(slash != NULL)
+        return slash + 1;
+
+    if(backslash != NULL)
+        return backslash + 1;
+
+    return path;
+}
+
+int create_vault(const char *path){
+    FILE *file;
+    VaultHeader header;
+    FileRecord empty_record;
+    char password[256];
+    char confirmation[256];
+    uint8_t password_key[VAULT_KEY_SIZE];
+    uint8_t vault_key[VAULT_KEY_SIZE];
+
+    if(path == NULL)
+        return 0;
+
+    file = fopen(path, "wb");
+
+    if(file == NULL){
+        printf("Failed to create vault.\n");
+        return 0;
+    }
+
+    memset(&header, 0, sizeof(header));
+    memset(&empty_record, 0, sizeof(empty_record));
+    memset(password_key, 0, sizeof(password_key));
+    memset(vault_key, 0, sizeof(vault_key));
+
+    memcpy(header.magic, VAULT_MAGIC, sizeof(header.magic));
     header.version = VAULT_VERSION;
     header.header_size = sizeof(VaultHeader);
-
     header.index_offset = sizeof(VaultHeader);
-    header.index_size = MAX_FILES * sizeof(FileRecord);
-    header.data_offset =
-        header.index_offset + header.index_size;
-
+    header.index_size = sizeof(FileRecord) * MAX_FILES;
+    header.data_offset = header.index_offset + header.index_size;
     header.file_count = 0;
 
-    /*
-     * Write vault header.
-     */
-    if (!write_vault_header(file, &header))
-    {
+    if(!read_password("Enter vault password: ", password, sizeof(password))){
         fclose(file);
         return 0;
     }
 
-    /*
-     * Reserve space for file index.
-     */
-    FileRecord empty_record = {0};
+    if(!read_password("Confirm vault password: ", confirmation, sizeof(confirmation))){
+        memset(password, 0, sizeof(password));
+        fclose(file);
+        return 0;
+    }
 
-    for (int i = 0; i < MAX_FILES; i++)
-    {
-        if (!write_file_record(file, &empty_record))
-        {
+    if(strcmp(password, confirmation) != 0){
+        printf("Passwords do not match.\n");
+        memset(password, 0, sizeof(password));
+        memset(confirmation, 0, sizeof(confirmation));
+        fclose(file);
+        return 0;
+    }
+
+    if(!generate_salt(header.password_salt, sizeof(header.password_salt))){
+        memset(password, 0, sizeof(password));
+        memset(confirmation, 0, sizeof(confirmation));
+        fclose(file);
+        return 0;
+    }
+
+    if(!derive_key(password, header.password_salt, sizeof(header.password_salt), password_key, sizeof(password_key))){
+        memset(password, 0, sizeof(password));
+        memset(confirmation, 0, sizeof(confirmation));
+        fclose(file);
+        return 0;
+    }
+
+    memcpy(header.password_hash, password_key, sizeof(header.password_hash));
+
+    if(!generate_random_bytes(vault_key, sizeof(vault_key))){
+        memset(password, 0, sizeof(password));
+        memset(confirmation, 0, sizeof(confirmation));
+        memset(password_key, 0, sizeof(password_key));
+        fclose(file);
+        return 0;
+    }
+
+    if(!generate_random_bytes(header.vault_key_nonce, sizeof(header.vault_key_nonce))){
+        memset(password, 0, sizeof(password));
+        memset(confirmation, 0, sizeof(confirmation));
+        memset(password_key, 0, sizeof(password_key));
+        memset(vault_key, 0, sizeof(vault_key));
+        fclose(file);
+        return 0;
+    }
+
+    if(!encrypt_vault_key(vault_key, password_key, header.vault_key_nonce, header.encrypted_vault_key)){
+        memset(password, 0, sizeof(password));
+        memset(confirmation, 0, sizeof(confirmation));
+        memset(password_key, 0, sizeof(password_key));
+        memset(vault_key, 0, sizeof(vault_key));
+        fclose(file);
+        return 0;
+    }
+
+    if(!write_vault_header(file, &header)){
+        memset(password, 0, sizeof(password));
+        memset(confirmation, 0, sizeof(confirmation));
+        memset(password_key, 0, sizeof(password_key));
+        memset(vault_key, 0, sizeof(vault_key));
+        fclose(file);
+        return 0;
+    }
+
+    for(int i = 0; i < MAX_FILES; i++){
+        if(!write_file_record(file, &empty_record)){
+            memset(password, 0, sizeof(password));
+            memset(confirmation, 0, sizeof(confirmation));
+            memset(password_key, 0, sizeof(password_key));
+            memset(vault_key, 0, sizeof(vault_key));
             fclose(file);
             return 0;
         }
     }
 
-    fclose(file);
-
-    printf("Vault created: %s\n", path);
-
-    return 1;
-}
-
-
-int open_vault(const char *path)
-{
-    if (path == NULL)
-        return 0;
-
-    FILE *file = fopen(path, "rb");
-
-    if (file == NULL)
-    {
-        perror("Failed to open vault");
-        return 0;
-    }
-
-    VaultHeader header;
-
-    if (!read_vault_header(file, &header))
-    {
-        printf("Failed to read vault header.\n");
-        fclose(file);
-        return 0;
-    }
-
-    if (!validate_vault_header(&header))
-    {
-        printf("Invalid VaultC vault.\n");
-        fclose(file);
-        return 0;
-    }
-
-    char password[256];
-
-    if (!read_password(
-            "Enter vault password: ",
-            password,
-            sizeof(password)))
-    {
-        fclose(file);
-        return 0;
-    }
-
-    int valid = verify_password(
-        password,
-        header.password_salt,
-        sizeof(header.password_salt),
-        header.password_hash,
-        sizeof(header.password_hash)
-    );
-
     memset(password, 0, sizeof(password));
-
-    if (!valid)
-    {
-        printf("Incorrect password.\n");
-        fclose(file);
-        return 0;
-    }
-
-    printf("Vault unlocked: %s\n", path);
+    memset(confirmation, 0, sizeof(confirmation));
+    memset(password_key, 0, sizeof(password_key));
+    memset(vault_key, 0, sizeof(vault_key));
 
     fclose(file);
 
+    printf("Vault created successfully.\n");
+
     return 1;
 }
-int list_vault(const char *path)
-{
-    if (path == NULL)
-        return 0;
 
-    FILE *file = fopen(path, "rb");
-
-    if (file == NULL)
-    {
-        perror("Failed to open vault");
-        return 0;
-    }
-
+int open_vault(const char *path){
+    FILE *file;
     VaultHeader header;
+    uint8_t vault_key[VAULT_KEY_SIZE];
 
-    if (!read_vault_header(file, &header))
-    {
-        printf("Failed to read vault header.\n");
+    if(path == NULL)
+        return 0;
+
+    file = fopen(path, "rb");
+
+    if(file == NULL){
+        printf("Failed to open vault.\n");
+        return 0;
+    }
+
+    if(!read_vault_header(file, &header) || !validate_vault_header(&header)){
+        printf("Invalid vault file.\n");
         fclose(file);
         return 0;
     }
 
-    if (!validate_vault_header(&header))
-    {
-        printf("Invalid VaultC vault.\n");
+    if(!load_vault_key(file, &header, vault_key)){
         fclose(file);
         return 0;
     }
 
-    FileRecord *records = NULL;
+    memset(vault_key, 0, sizeof(vault_key));
 
-    if (!read_file_index(file, &header, &records))
-    {
-        printf("Failed to read file index.\n");
+    fclose(file);
+
+    printf("Vault opened successfully.\n");
+
+    return 1;
+}
+
+int list_vault(const char *path){
+    FILE *file;
+    VaultHeader header;
+    FileRecord *records;
+
+    if(path == NULL)
+        return 0;
+
+    file = fopen(path, "rb");
+
+    if(file == NULL){
+        printf("Failed to open vault.\n");
+        return 0;
+    }
+
+    if(!read_vault_header(file, &header) || !validate_vault_header(&header)){
+        printf("Invalid vault file.\n");
         fclose(file);
         return 0;
     }
 
-    printf("\nFiles in %s:\n\n", path);
+    records = NULL;
 
-    printf("%-5s %-30s %-12s\n",
-           "ID",
-           "NAME",
-           "SIZE");
+    if(!read_file_index(file, &header, &records)){
+        printf("Failed to read vault index.\n");
+        fclose(file);
+        return 0;
+    }
 
-    printf("-----------------------------------------------\n");
+    printf("\nFiles in vault:\n");
 
-    int found = 0;
-
-    for (uint32_t i = 0;
-         i < header.file_count;
-         i++)
-    {
-        if (records[i].active)
-        {
-            printf("%-5u %-30s %-12llu\n",
-                   records[i].id,
-                   records[i].name,
-                   (unsigned long long)
-                   records[i].original_size);
-
-            found = 1;
+    for(uint32_t i = 0; i < MAX_FILES; i++){
+        if(records[i].active){
+            printf("%u. %s (%llu bytes)\n", records[i].id, records[i].name, (unsigned long long)records[i].original_size);
         }
-    }
-
-    if (!found)
-    {
-        printf("Vault is empty.\n");
     }
 
     free(records);
@@ -335,910 +324,425 @@ int list_vault(const char *path)
     return 1;
 }
 
-
-int add_file(const char *vault_path,
-             const char *file_path)
-{
-    if (vault_path == NULL ||
-        file_path == NULL)
-    {
-        return 0;
-    }
-
-    FILE *source = fopen(file_path, "rb");
-
-    if (source == NULL)
-    {
-        perror("Failed to open source file");
-        return 0;
-    }
-
-    FILE *vault = fopen(vault_path, "rb+");
-
-    if (vault == NULL)
-    {
-        perror("Failed to open vault");
-        fclose(source);
-        return 0;
-    }
-
+int add_file(const char *vault_path, const char *file_path){
+    FILE *source;
+    FILE *vault;
     VaultHeader header;
+    FileRecord *records;
+    FileRecord record;
+    uint8_t vault_key[VAULT_KEY_SIZE];
+    const char *filename;
+    uint64_t original_size;
+    uint64_t encrypted_size;
 
-    if (!read_vault_header(vault, &header))
-    {
-        printf("Failed to read vault header.\n");
+    if(vault_path == NULL || file_path == NULL)
+        return 0;
 
-        fclose(source);
-        fclose(vault);
+    source = fopen(file_path, "rb");
 
+    if(source == NULL){
+        printf("Failed to open source file.\n");
         return 0;
     }
 
-    if (!validate_vault_header(&header))
-    {
-        printf("Invalid VaultC vault.\n");
-
+    if(!get_file_size(source, &original_size)){
         fclose(source);
-        fclose(vault);
-
         return 0;
     }
 
-    if (header.file_count >= MAX_FILES)
-    {
+    vault = fopen(vault_path, "rb+");
+
+    if(vault == NULL){
+        fclose(source);
+        printf("Failed to open vault.\n");
+        return 0;
+    }
+
+    if(!read_vault_header(vault, &header) || !validate_vault_header(&header)){
+        printf("Invalid vault file.\n");
+        fclose(source);
+        fclose(vault);
+        return 0;
+    }
+
+    if(!load_vault_key(vault, &header, vault_key)){
+        fclose(source);
+        fclose(vault);
+        return 0;
+    }
+
+    records = NULL;
+
+    if(!read_file_index(vault, &header, &records)){
+        memset(vault_key, 0, sizeof(vault_key));
+        fclose(source);
+        fclose(vault);
+        return 0;
+    }
+
+    if(header.file_count >= MAX_FILES){
         printf("Vault is full.\n");
-
+        free(records);
+        memset(vault_key, 0, sizeof(vault_key));
         fclose(source);
         fclose(vault);
-
         return 0;
     }
 
-    /*
-     * Extract filename from both Windows and Linux paths.
-     */
-    const char *filename =
-        strrchr(file_path, '\\');
+    filename = get_filename(file_path);
 
-    if (filename == NULL)
-    {
-        filename =
-            strrchr(file_path, '/');
-    }
-
-    if (filename != NULL)
-    {
-        filename++;
-    }
-    else
-    {
-        filename = file_path;
-    }
-
-    /*
-     * Prevent duplicate filenames.
-     */
-    FileRecord *records = NULL;
-
-    if (!read_file_index(
-            vault,
-            &header,
-            &records))
-    {
-        printf("Failed to read file index.\n");
-
+    if(filename[0] == '\0'){
+        free(records);
+        memset(vault_key, 0, sizeof(vault_key));
         fclose(source);
         fclose(vault);
-
         return 0;
     }
 
-    for (uint32_t i = 0;
-         i < header.file_count;
-         i++)
-    {
-        if (records[i].active &&
-            strcmp(records[i].name,
-                   filename) == 0)
-        {
-            printf(
-                "File already exists in vault: %s\n",
-                filename);
-
+    for(uint32_t i = 0; i < MAX_FILES; i++){
+        if(records[i].active && strcmp(records[i].name, filename) == 0){
+            printf("A file with that name already exists.\n");
             free(records);
-
+            memset(vault_key, 0, sizeof(vault_key));
             fclose(source);
             fclose(vault);
-
             return 0;
         }
     }
 
-    free(records);
-
-    /*
-     * Determine source file size.
-     */
-    if (fseek(source, 0, SEEK_END) != 0)
-    {
-        printf(
-            "Failed to determine source file size.\n");
-
-        fclose(source);
-        fclose(vault);
-
-        return 0;
-    }
-
-    long source_size = ftell(source);
-
-    if (source_size < 0)
-    {
-        printf(
-            "Failed to determine source file size.\n");
-
-        fclose(source);
-        fclose(vault);
-
-        return 0;
-    }
-
-    rewind(source);
-
-    /*
-     * Append file data to the vault.
-     */
-    if (fseek(vault, 0, SEEK_END) != 0)
-    {
-        printf(
-            "Failed to seek to vault data area.\n");
-
-        fclose(source);
-        fclose(vault);
-
-        return 0;
-    }
-
-    long data_position = ftell(vault);
-
-    if (data_position < 0)
-    {
-        printf(
-            "Failed to determine vault data position.\n");
-
-        fclose(source);
-        fclose(vault);
-
-        return 0;
-    }
-
-    unsigned char buffer[8192];
-
-    size_t bytes_read;
-
-    while ((bytes_read =
-            fread(buffer,
-                  1,
-                  sizeof(buffer),
-                  source)) > 0)
-    {
-        if (fwrite(buffer,
-                   1,
-                   bytes_read,
-                   vault) != bytes_read)
-        {
-            printf(
-                "Failed to write file data to vault.\n");
-
-            fclose(source);
-            fclose(vault);
-
-            return 0;
-        }
-    }
-
-    if (ferror(source))
-    {
-        printf(
-            "Failed while reading source file.\n");
-
-        fclose(source);
-        fclose(vault);
-
-        return 0;
-    }
-
-    /*
-     * Create file record.
-     */
-    FileRecord record = {0};
+    memset(&record, 0, sizeof(record));
 
     record.id = header.file_count + 1;
-
-    strncpy(
-        record.name,
-        filename,
-        MAX_FILENAME_LENGTH - 1);
-
-    record.name[
-        MAX_FILENAME_LENGTH - 1] = '\0';
-
-    record.original_size =
-        (uint64_t)source_size;
-
-    /*
-     * Encryption is not implemented yet.
-     * For now encrypted_size equals original_size.
-     */
-    record.encrypted_size =
-        (uint64_t)source_size;
-
-    record.data_offset =
-        (uint64_t)data_position;
-
+    strncpy(record.name, filename, MAX_FILENAME_LENGTH - 1);
+    record.name[MAX_FILENAME_LENGTH - 1] = '\0';
+    record.original_size = original_size;
+    record.data_offset = header.data_offset;
     record.active = 1;
 
-    /*
-     * Write record into file index.
-     */
-    uint64_t record_offset =
-        header.index_offset +
-        (uint64_t)(
-            header.file_count *
-            sizeof(FileRecord)
-        );
+    for(uint32_t i = 0; i < MAX_FILES; i++){
+        if(records[i].active && records[i].data_offset + records[i].encrypted_size > record.data_offset)
+            record.data_offset = records[i].data_offset + records[i].encrypted_size;
+    }
 
-    if (fseek(
-            vault,
-            (long)record_offset,
-            SEEK_SET) != 0)
-    {
-        printf(
-            "Failed to locate file index slot.\n");
-
+    if(fseek(vault, (long)record.data_offset, SEEK_SET) != 0){
+        free(records);
+        memset(vault_key, 0, sizeof(vault_key));
         fclose(source);
         fclose(vault);
-
         return 0;
     }
 
-    if (!write_file_record(
-            vault,
-            &record))
-    {
-        printf(
-            "Failed to write file record.\n");
-
+    if(!encrypt_file(source, vault, vault_key, record.stream_header, &encrypted_size)){
+        printf("File encryption failed.\n");
+        free(records);
+        memset(vault_key, 0, sizeof(vault_key));
         fclose(source);
         fclose(vault);
-
         return 0;
     }
 
-    /*
-     * Update file count.
-     */
+    record.encrypted_size = encrypted_size;
+
+    if(fseek(vault, (long)(header.index_offset + (header.file_count * sizeof(FileRecord))), SEEK_SET) != 0){
+        free(records);
+        memset(vault_key, 0, sizeof(vault_key));
+        fclose(source);
+        fclose(vault);
+        return 0;
+    }
+
+    if(!write_file_record(vault, &record)){
+        free(records);
+        memset(vault_key, 0, sizeof(vault_key));
+        fclose(source);
+        fclose(vault);
+        return 0;
+    }
+
     header.file_count++;
 
-    if (fseek(vault, 0, SEEK_SET) != 0)
-    {
-        printf(
-            "Failed to update vault header.\n");
-
+    if(!write_vault_header(vault, &header)){
+        free(records);
+        memset(vault_key, 0, sizeof(vault_key));
         fclose(source);
         fclose(vault);
-
         return 0;
     }
 
-    if (!write_vault_header(
-            vault,
-            &header))
-    {
-        printf(
-            "Failed to update vault header.\n");
-
-        fclose(source);
-        fclose(vault);
-
-        return 0;
-    }
+    free(records);
+    memset(vault_key, 0, sizeof(vault_key));
 
     fclose(source);
     fclose(vault);
 
-    printf("Added: %s\n", filename);
+    printf("File encrypted and added successfully.\n");
 
     return 1;
 }
 
-
-int extract_file(const char *vault_path,
-                 const char *filename)
-{
-    if (vault_path == NULL ||
-        filename == NULL)
-    {
-        return 0;
-    }
-
-    FILE *vault =
-        fopen(vault_path, "rb");
-
-    if (vault == NULL)
-    {
-        perror("Failed to open vault");
-        return 0;
-    }
-
+int extract_file(const char *vault_path, const char *filename){
+    FILE *vault;
+    FILE *output;
     VaultHeader header;
+    FileRecord *records;
+    uint8_t vault_key[VAULT_KEY_SIZE];
+    FileRecord *target;
+    char output_name[MAX_FILENAME_LENGTH];
 
-    if (!read_vault_header(
-            vault,
-            &header))
-    {
-        printf(
-            "Failed to read vault header.\n");
+    if(vault_path == NULL || filename == NULL)
+        return 0;
 
+    vault = fopen(vault_path, "rb");
+
+    if(vault == NULL){
+        printf("Failed to open vault.\n");
+        return 0;
+    }
+
+    if(!read_vault_header(vault, &header) || !validate_vault_header(&header)){
+        printf("Invalid vault file.\n");
         fclose(vault);
         return 0;
     }
 
-    if (!validate_vault_header(
-            &header))
-    {
-        printf(
-            "Invalid VaultC vault.\n");
-
+    if(!load_vault_key(vault, &header, vault_key)){
         fclose(vault);
         return 0;
     }
 
-    FileRecord *records = NULL;
+    records = NULL;
 
-    if (!read_file_index(
-            vault,
-            &header,
-            &records))
-    {
-        printf(
-            "Failed to read file index.\n");
-
+    if(!read_file_index(vault, &header, &records)){
+        memset(vault_key, 0, sizeof(vault_key));
         fclose(vault);
         return 0;
     }
 
-    FileRecord *target = NULL;
+    target = NULL;
 
-    for (uint32_t i = 0;
-         i < header.file_count;
-         i++)
-    {
-        if (records[i].active &&
-            strcmp(
-                records[i].name,
-                filename) == 0)
-        {
+    for(uint32_t i = 0; i < MAX_FILES; i++){
+        if(records[i].active && strcmp(records[i].name, filename) == 0){
             target = &records[i];
             break;
         }
     }
 
-    if (target == NULL)
-    {
-        printf(
-            "File not found: %s\n",
-            filename);
-
+    if(target == NULL){
+        printf("File not found in vault.\n");
         free(records);
+        memset(vault_key, 0, sizeof(vault_key));
         fclose(vault);
-
         return 0;
     }
 
-    /*
-     * Prevent accidental overwrite.
-     */
-    FILE *output =
-        fopen(filename, "rb");
+    output = fopen(filename, "wb");
 
-    if (output != NULL)
-    {
+    if(output == NULL){
+        printf("Failed to create output file.\n");
+        free(records);
+        memset(vault_key, 0, sizeof(vault_key));
+        fclose(vault);
+        return 0;
+    }
+
+    if(fseek(vault, (long)target->data_offset, SEEK_SET) != 0){
         fclose(output);
-
-        printf(
-            "File already exists: %s\n",
-            filename);
-
-        printf(
-            "Extraction cancelled to prevent overwrite.\n");
-
         free(records);
+        memset(vault_key, 0, sizeof(vault_key));
         fclose(vault);
-
         return 0;
     }
 
-    output =
-        fopen(filename, "wb");
-
-    if (output == NULL)
-    {
-        perror(
-            "Failed to create output file");
-
-        free(records);
-        fclose(vault);
-
-        return 0;
-    }
-
-    if (fseek(
-            vault,
-            (long)target->data_offset,
-            SEEK_SET) != 0)
-    {
-        printf(
-            "Failed to locate file data.\n");
-
+    if(!decrypt_file(vault, output, vault_key, target->stream_header, target->original_size, target->encrypted_size)){
+        printf("File authentication or decryption failed.\n");
         fclose(output);
         remove(filename);
-
         free(records);
+        memset(vault_key, 0, sizeof(vault_key));
         fclose(vault);
-
         return 0;
-    }
-
-    unsigned char buffer[8192];
-
-    uint64_t remaining =
-        target->encrypted_size;
-
-    while (remaining > 0)
-    {
-        size_t chunk_size =
-            sizeof(buffer);
-
-        if (remaining < chunk_size)
-        {
-            chunk_size =
-                (size_t)remaining;
-        }
-
-        size_t bytes_read =
-            fread(
-                buffer,
-                1,
-                chunk_size,
-                vault);
-
-        if (bytes_read != chunk_size)
-        {
-            printf(
-                "Failed to read file data from vault.\n");
-
-            fclose(output);
-            remove(filename);
-
-            free(records);
-            fclose(vault);
-
-            return 0;
-        }
-
-        if (fwrite(
-                buffer,
-                1,
-                bytes_read,
-                output) != bytes_read)
-        {
-            printf(
-                "Failed to write extracted file.\n");
-
-            fclose(output);
-            remove(filename);
-
-            free(records);
-            fclose(vault);
-
-            return 0;
-        }
-
-        remaining -= bytes_read;
     }
 
     fclose(output);
     free(records);
+    memset(vault_key, 0, sizeof(vault_key));
     fclose(vault);
 
-    printf(
-        "Extracted: %s\n",
-        filename);
+    printf("File extracted successfully.\n");
 
     return 1;
 }
 
-
-int remove_file(const char *vault_path,
-                const char *filename)
-{
-    if (vault_path == NULL ||
-        filename == NULL)
-    {
-        return 0;
-    }
-
-    FILE *vault =
-        fopen(vault_path, "rb+");
-
-    if (vault == NULL)
-    {
-        perror("Failed to open vault");
-        return 0;
-    }
-
+int remove_file(const char *vault_path, const char *filename){
+    FILE *vault;
     VaultHeader header;
+    FileRecord *records;
 
-    if (!read_vault_header(
-            vault,
-            &header))
-    {
-        printf(
-            "Failed to read vault header.\n");
+    if(vault_path == NULL || filename == NULL)
+        return 0;
 
+    vault = fopen(vault_path, "rb+");
+
+    if(vault == NULL){
+        printf("Failed to open vault.\n");
+        return 0;
+    }
+
+    if(!read_vault_header(vault, &header) || !validate_vault_header(&header)){
+        printf("Invalid vault file.\n");
         fclose(vault);
         return 0;
     }
 
-    if (!validate_vault_header(
-            &header))
-    {
-        printf(
-            "Invalid VaultC vault.\n");
+    records = NULL;
 
+    if(!read_file_index(vault, &header, &records)){
         fclose(vault);
         return 0;
     }
 
-    FileRecord *records = NULL;
-
-    if (!read_file_index(
-            vault,
-            &header,
-            &records))
-    {
-        printf(
-            "Failed to read file index.\n");
-
-        fclose(vault);
-        return 0;
-    }
-
-    int found = 0;
-
-    for (uint32_t i = 0;
-         i < header.file_count;
-         i++)
-    {
-        if (records[i].active &&
-            strcmp(
-                records[i].name,
-                filename) == 0)
-        {
-            uint64_t record_offset =
-                header.index_offset +
-                (uint64_t)(
-                    i * sizeof(FileRecord)
-                );
-
+    for(uint32_t i = 0; i < MAX_FILES; i++){
+        if(records[i].active && strcmp(records[i].name, filename) == 0){
             records[i].active = 0;
 
-            if (fseek(
-                    vault,
-                    (long)record_offset,
-                    SEEK_SET) != 0)
-            {
-                printf(
-                    "Failed to locate file record.\n");
-
+            if(fseek(vault, (long)(header.index_offset + (i * sizeof(FileRecord))), SEEK_SET) != 0){
                 free(records);
                 fclose(vault);
-
                 return 0;
             }
 
-            if (!write_file_record(
-                    vault,
-                    &records[i]))
-            {
-                printf(
-                    "Failed to update file record.\n");
-
+            if(!write_file_record(vault, &records[i])){
                 free(records);
                 fclose(vault);
-
                 return 0;
             }
-
-            found = 1;
-            break;
-        }
-    }
-
-    free(records);
-    fclose(vault);
-
-    if (!found)
-    {
-        printf(
-            "File not found: %s\n",
-            filename);
-
-        return 0;
-    }
-
-    printf(
-        "Removed: %s\n",
-        filename);
-
-    return 1;
-}
-
-
-int rename_file(const char *vault_path,
-                const char *old_name,
-                const char *new_name)
-{
-    if (vault_path == NULL ||
-        old_name == NULL ||
-        new_name == NULL)
-    {
-        return 0;
-    }
-
-    if (strlen(new_name) >=
-        MAX_FILENAME_LENGTH)
-    {
-        printf(
-            "New filename is too long.\n");
-
-        return 0;
-    }
-
-    FILE *vault =
-        fopen(vault_path, "rb+");
-
-    if (vault == NULL)
-    {
-        perror("Failed to open vault");
-        return 0;
-    }
-
-    VaultHeader header;
-
-    if (!read_vault_header(
-            vault,
-            &header))
-    {
-        printf(
-            "Failed to read vault header.\n");
-
-        fclose(vault);
-        return 0;
-    }
-
-    if (!validate_vault_header(
-            &header))
-    {
-        printf(
-            "Invalid VaultC vault.\n");
-
-        fclose(vault);
-        return 0;
-    }
-
-    FileRecord *records = NULL;
-
-    if (!read_file_index(
-            vault,
-            &header,
-            &records))
-    {
-        printf(
-            "Failed to read file index.\n");
-
-        fclose(vault);
-        return 0;
-    }
-
-    int target_index = -1;
-
-    for (uint32_t i = 0;
-         i < header.file_count;
-         i++)
-    {
-        if (records[i].active &&
-            strcmp(
-                records[i].name,
-                new_name) == 0)
-        {
-            printf(
-                "A file with that name already exists.\n");
 
             free(records);
             fclose(vault);
 
-            return 0;
-        }
+            printf("File removed from vault.\n");
 
-        if (records[i].active &&
-            strcmp(
-                records[i].name,
-                old_name) == 0)
-        {
-            target_index = (int)i;
+            return 1;
         }
     }
 
-    if (target_index == -1)
-    {
-        printf(
-            "File not found: %s\n",
-            old_name);
-
-        free(records);
-        fclose(vault);
-
-        return 0;
-    }
-
-    strcpy(
-        records[target_index].name,
-        new_name);
-
-    uint64_t record_offset =
-        header.index_offset +
-        (uint64_t)(
-            target_index *
-            sizeof(FileRecord)
-        );
-
-    if (fseek(
-            vault,
-            (long)record_offset,
-            SEEK_SET) != 0)
-    {
-        printf(
-            "Failed to locate file record.\n");
-
-        free(records);
-        fclose(vault);
-
-        return 0;
-    }
-
-    if (!write_file_record(
-            vault,
-            &records[target_index]))
-    {
-        printf(
-            "Failed to update file record.\n");
-
-        free(records);
-        fclose(vault);
-
-        return 0;
-    }
+    printf("File not found in vault.\n");
 
     free(records);
     fclose(vault);
 
-    printf(
-        "Renamed: %s -> %s\n",
-        old_name,
-        new_name);
-
-    return 1;
+    return 0;
 }
 
-
-int search_files(const char *vault_path,
-                 const char *query)
-{
-    if (vault_path == NULL ||
-        query == NULL ||
-        strlen(query) == 0)
-    {
-        return 0;
-    }
-
-    FILE *vault =
-        fopen(vault_path, "rb");
-
-    if (vault == NULL)
-    {
-        perror("Failed to open vault");
-        return 0;
-    }
-
+int rename_file(const char *vault_path, const char *old_name, const char *new_name){
+    FILE *vault;
     VaultHeader header;
+    FileRecord *records;
 
-    if (!read_vault_header(
-            vault,
-            &header))
-    {
-        printf(
-            "Failed to read vault header.\n");
+    if(vault_path == NULL || old_name == NULL || new_name == NULL)
+        return 0;
 
+    vault = fopen(vault_path, "rb+");
+
+    if(vault == NULL){
+        printf("Failed to open vault.\n");
+        return 0;
+    }
+
+    if(!read_vault_header(vault, &header) || !validate_vault_header(&header)){
+        printf("Invalid vault file.\n");
         fclose(vault);
         return 0;
     }
 
-    if (!validate_vault_header(
-            &header))
-    {
-        printf(
-            "Invalid VaultC vault.\n");
+    records = NULL;
 
+    if(!read_file_index(vault, &header, &records)){
         fclose(vault);
         return 0;
     }
 
-    FileRecord *records = NULL;
-
-    if (!read_file_index(
-            vault,
-            &header,
-            &records))
-    {
-        printf(
-            "Failed to read file index.\n");
-
-        fclose(vault);
-        return 0;
+    for(uint32_t i = 0; i < MAX_FILES; i++){
+        if(records[i].active && strcmp(records[i].name, new_name) == 0){
+            printf("A file with the new name already exists.\n");
+            free(records);
+            fclose(vault);
+            return 0;
+        }
     }
 
-    printf(
-        "\nSearch results for: %s\n\n",
-        query);
+    for(uint32_t i = 0; i < MAX_FILES; i++){
+        if(records[i].active && strcmp(records[i].name, old_name) == 0){
+            strncpy(records[i].name, new_name, MAX_FILENAME_LENGTH - 1);
+            records[i].name[MAX_FILENAME_LENGTH - 1] = '\0';
 
-    printf(
-        "%-5s %-30s %-12s\n",
-        "ID",
-        "NAME",
-        "SIZE");
+            if(fseek(vault, (long)(header.index_offset + (i * sizeof(FileRecord))), SEEK_SET) != 0){
+                free(records);
+                fclose(vault);
+                return 0;
+            }
 
-    printf(
-        "-----------------------------------------------\n");
+            if(!write_file_record(vault, &records[i])){
+                free(records);
+                fclose(vault);
+                return 0;
+            }
 
+            free(records);
+            fclose(vault);
+
+            printf("File renamed successfully.\n");
+
+            return 1;
+        }
+    }
+
+    printf("File not found in vault.\n");
+
+    free(records);
+    fclose(vault);
+
+    return 0;
+}
+
+int search_files(const char *vault_path, const char *query){
+    FILE *vault;
+    VaultHeader header;
+    FileRecord *records;
     int found = 0;
 
-    for (uint32_t i = 0;
-         i < header.file_count;
-         i++)
-    {
-        if (records[i].active &&
-            strstr(
-                records[i].name,
-                query) != NULL)
-        {
-            printf(
-                "%-5u %-30s %-12llu\n",
-                records[i].id,
-                records[i].name,
-                (unsigned long long)
-                records[i].original_size);
+    if(vault_path == NULL || query == NULL)
+        return 0;
 
+    vault = fopen(vault_path, "rb");
+
+    if(vault == NULL){
+        printf("Failed to open vault.\n");
+        return 0;
+    }
+
+    if(!read_vault_header(vault, &header) || !validate_vault_header(&header)){
+        printf("Invalid vault file.\n");
+        fclose(vault);
+        return 0;
+    }
+
+    records = NULL;
+
+    if(!read_file_index(vault, &header, &records)){
+        fclose(vault);
+        return 0;
+    }
+
+    for(uint32_t i = 0; i < MAX_FILES; i++){
+        if(records[i].active && strstr(records[i].name, query) != NULL){
+            printf("%s (%llu bytes)\n", records[i].name, (unsigned long long)records[i].original_size);
             found = 1;
         }
     }
 
-    if (!found)
-    {
-        printf(
-            "No matching files found.\n");
-    }
+    if(!found)
+        printf("No matching files found.\n");
 
     free(records);
     fclose(vault);

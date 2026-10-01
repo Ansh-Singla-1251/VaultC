@@ -4,10 +4,9 @@
 #include "../include/cli.h"
 #include "../include/vault.h"
 
-void print_usage(void)
-{
-    printf("VaultC - Secure File Vault\n\n");
-
+void print_usage(void){
+    printf("VaultC - Secure File Vault\n");
+    printf("\n");
     printf("Usage:\n");
     printf("  vault create <vault>\n");
     printf("  vault open <vault>\n");
@@ -17,87 +16,88 @@ void print_usage(void)
     printf("  vault remove <vault> <file>\n");
     printf("  vault rename <vault> <old> <new>\n");
     printf("  vault search <vault> <query>\n");
-    printf("  vault verify <vault>\n");
-    printf("  vault passwd <vault>\n");
 }
 
-int handle_command(int argc, char *argv[])
-{
-    if (argc < 2) {
+int handle_command(int argc, char *argv[]){
+    if(argc < 2){
         print_usage();
         return 1;
     }
 
-    if (strcmp(argv[1], "create") == 0) {
+    if(strcmp(argv[1], "create") == 0){
         if(argc != 3){
-            printf("Usage: vault create <vault>\n");
+            print_usage();
             return 1;
         }
+
         return create_vault(argv[2]) ? 0 : 1;
     }
-    else if (strcmp(argv[1], "open") == 0) {
+
+    if(strcmp(argv[1], "open") == 0){
         if(argc != 3){
-            printf("Usage: vault open <vault>\n");
+            print_usage();
             return 1;
         }
+
         return open_vault(argv[2]) ? 0 : 1;
     }
-    else if (strcmp(argv[1], "add") == 0) {
+
+    if(strcmp(argv[1], "add") == 0){
         if(argc != 4){
-            printf("Usage: vault add <vault> <file>\n");
+            print_usage();
             return 1;
         }
+
         return add_file(argv[2], argv[3]) ? 0 : 1;
     }
-    else if (strcmp(argv[1], "extract") == 0) {
-        if (argc != 4){
-            printf("Usage: vault extract <vault> <file>\n");
+
+    if(strcmp(argv[1], "extract") == 0){
+        if(argc != 4){
+            print_usage();
             return 1;
         }
+
         return extract_file(argv[2], argv[3]) ? 0 : 1;
     }
-    else if (strcmp(argv[1], "list") == 0) {
-        if (argc != 3){
-            printf("Usage: vault list <vault>\n");
+
+    if(strcmp(argv[1], "list") == 0){
+        if(argc != 3){
+            print_usage();
             return 1;
         }
+
         return list_vault(argv[2]) ? 0 : 1;
     }
-    else if (strcmp(argv[1], "remove") == 0) {
-        if (argc != 4){
-            printf("Usage: vault remove <vault> <filename>\n");
+
+    if(strcmp(argv[1], "remove") == 0){
+        if(argc != 4){
+            print_usage();
             return 1;
         }
+
         return remove_file(argv[2], argv[3]) ? 0 : 1;
     }
-    else if(strcmp(argv[1], "rename") == 0){
-        if (argc != 5)
-        {
-            printf("Usage: vault rename <vault> <old_name> <new_name>\n");
+
+    if(strcmp(argv[1], "rename") == 0){
+        if(argc != 5){
+            print_usage();
             return 1;
         }
 
         return rename_file(argv[2], argv[3], argv[4]) ? 0 : 1;
-    
-    }
-   else if (strcmp(argv[1], "search") == 0){
-        if (argc != 4){
-            printf("Usage: vault search <vault> <query>\n");
-            return 1;
-        }
-        return search_files(argv[2], argv[3]) ? 0 : 1;
-    }
-    else if (strcmp(argv[1], "verify") == 0) {
-        printf("VERIFY command selected\n");
-    }
-    else if (strcmp(argv[1], "passwd") == 0) {
-        printf("PASSWD command selected\n");
-    }
-    else {
-        printf("Unknown command: %s\n\n", argv[1]);
-        print_usage();
-        return 1;
     }
 
-    return 0;
+    if(strcmp(argv[1], "search") == 0){
+        if(argc != 4){
+            print_usage();
+            return 1;
+        }
+
+        return search_files(argv[2], argv[3]) ? 0 : 1;
+    }
+
+    printf("Unknown command: %s\n", argv[1]);
+    print_usage();
+
+    return 1;
 }
