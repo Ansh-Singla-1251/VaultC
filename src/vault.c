@@ -1,9 +1,13 @@
+#define _FILE_OFFSET_BITS 64
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 #include <termios.h>
 #include <unistd.h>
+#include <sys/types.h>
+#include <sodium.h>
 
 #include "../include/vault.h"
 #include "../include/storage.h"
@@ -57,7 +61,7 @@ static int load_vault_key(FILE *file, VaultHeader *header, uint8_t *vault_key){
         return 0;
     }
 
-    if(!verify_password(password, header->password_salt, sizeof(header->password_salt), header->password_hash, sizeof(header->password_hash))){
+    if(sodium_memcmp(password_key, header->password_hash, sizeof(password_key)) != 0){
         printf("Incorrect password.\n");
         memset(password, 0, sizeof(password));
         memset(password_key, 0, sizeof(password_key));
@@ -78,26 +82,26 @@ static int load_vault_key(FILE *file, VaultHeader *header, uint8_t *vault_key){
 }
 
 static int get_file_size(FILE *file, uint64_t *size){
-    long current_position;
-    long end_position;
+    off_t current_position;
+    off_t end_position;
 
     if(file == NULL || size == NULL)
         return 0;
 
-    current_position = ftell(file);
+    current_position = ftello(file);
 
     if(current_position < 0)
         return 0;
 
-    if(fseek(file, 0, SEEK_END) != 0)
+    if(fseeko(file, 0, SEEK_END) != 0)
         return 0;
 
-    end_position = ftell(file);
+    end_position = ftello(file);
 
     if(end_position < 0)
         return 0;
 
-    if(fseek(file, current_position, SEEK_SET) != 0)
+    if(fseeko(file, current_position, SEEK_SET) != 0)
         return 0;
 
     *size = (uint64_t)end_position;
@@ -152,9 +156,9 @@ int create_vault(const char *path){
 
     memcpy(header.magic, VAULT_MAGIC, sizeof(header.magic));
     header.version = VAULT_VERSION;
-    header.header_size = sizeof(VaultHeader);
-    header.index_offset = sizeof(VaultHeader);
-    header.index_size = sizeof(FileRecord) * MAX_FILES;
+    header.header_size = VAULT_HEADER_SIZE;
+    header.index_offset = VAULT_HEADER_SIZE;
+    header.index_size = (uint64_t)FILE_RECORD_SIZE * MAX_FILES;
     header.data_offset = header.index_offset + header.index_size;
     header.file_count = 0;
 
@@ -344,6 +348,7 @@ int add_file(const char *vault_path, const char *file_path){
     const char *filename;
     uint64_t original_size;
     uint64_t encrypted_size;
+    uint32_t slot = MAX_FILES;
 
     if(vault_path == NULL || file_path == NULL)
         return 0;
@@ -411,6 +416,9 @@ int add_file(const char *vault_path, const char *file_path){
     }
 
     for(uint32_t i = 0; i < MAX_FILES; i++){
+        if(!records[i].active && slot == MAX_FILES)
+            slot = i;
+
         if(records[i].active && strcmp(records[i].name, filename) == 0){
             printf("A file with that name already exists.\n");
             free(records);
@@ -421,9 +429,18 @@ int add_file(const char *vault_path, const char *file_path){
         }
     }
 
+    if(slot == MAX_FILES){
+        printf("No available vault slot.\n");
+        free(records);
+        memset(vault_key, 0, sizeof(vault_key));
+        fclose(source);
+        fclose(vault);
+        return 0;
+    }
+
     memset(&record, 0, sizeof(record));
 
-    record.id = header.file_count + 1;
+    record.id = slot + 1;
     strncpy(record.name, filename, MAX_FILENAME_LENGTH - 1);
     record.name[MAX_FILENAME_LENGTH - 1] = '\0';
     record.original_size = original_size;
@@ -431,11 +448,11 @@ int add_file(const char *vault_path, const char *file_path){
     record.active = 1;
 
     for(uint32_t i = 0; i < MAX_FILES; i++){
-        if(records[i].active && records[i].data_offset + records[i].encrypted_size > record.data_offset)
+        if(records[i].encrypted_size > 0 && records[i].data_offset + records[i].encrypted_size > record.data_offset)
             record.data_offset = records[i].data_offset + records[i].encrypted_size;
     }
 
-    if(fseek(vault, (long)record.data_offset, SEEK_SET) != 0){
+    if(fseeko(vault, (off_t)record.data_offset, SEEK_SET) != 0){
         free(records);
         memset(vault_key, 0, sizeof(vault_key));
         fclose(source);
@@ -454,7 +471,7 @@ int add_file(const char *vault_path, const char *file_path){
 
     record.encrypted_size = encrypted_size;
 
-    if(fseek(vault, (long)(header.index_offset + (header.file_count * sizeof(FileRecord))), SEEK_SET) != 0){
+    if(fseeko(vault, (off_t)(header.index_offset + ((uint64_t)slot * FILE_RECORD_SIZE)), SEEK_SET) != 0){
         free(records);
         memset(vault_key, 0, sizeof(vault_key));
         fclose(source);
@@ -554,7 +571,7 @@ int extract_file(const char *vault_path, const char *filename){
         return 0;
     }
 
-    if(fseek(vault, (long)target->data_offset, SEEK_SET) != 0){
+    if(fseeko(vault, (off_t)target->data_offset, SEEK_SET) != 0){
         fclose(output);
         free(records);
         memset(vault_key, 0, sizeof(vault_key));
@@ -621,7 +638,7 @@ int remove_file(const char *vault_path, const char *filename){
         if(records[i].active && strcmp(records[i].name, filename) == 0){
             records[i].active = 0;
 
-            if(fseek(vault, (long)(header.index_offset + (i * sizeof(FileRecord))), SEEK_SET) != 0){
+            if(fseeko(vault, (off_t)(header.index_offset + ((uint64_t)i * FILE_RECORD_SIZE)), SEEK_SET) != 0){
                 free(records);
                 memset(vault_key, 0, sizeof(vault_key));
                 fclose(vault);
@@ -629,6 +646,16 @@ int remove_file(const char *vault_path, const char *filename){
             }
 
             if(!write_file_record(vault, &records[i])){
+                free(records);
+                memset(vault_key, 0, sizeof(vault_key));
+                fclose(vault);
+                return 0;
+            }
+
+            if(header.file_count > 0)
+                header.file_count--;
+
+            if(!write_vault_header(vault, &header)){
                 free(records);
                 memset(vault_key, 0, sizeof(vault_key));
                 fclose(vault);
@@ -709,7 +736,7 @@ int rename_file(const char *vault_path, const char *old_name, const char *new_na
             strncpy(records[i].name, new_name, MAX_FILENAME_LENGTH - 1);
             records[i].name[MAX_FILENAME_LENGTH - 1] = '\0';
 
-            if(fseek(vault, (long)(header.index_offset + (i * sizeof(FileRecord))), SEEK_SET) != 0){
+            if(fseeko(vault, (off_t)(header.index_offset + ((uint64_t)i * FILE_RECORD_SIZE)), SEEK_SET) != 0){
                 free(records);
                 memset(vault_key, 0, sizeof(vault_key));
                 fclose(vault);
@@ -850,7 +877,7 @@ int verify_vault(const char *path){
         if(!records[i].active)
             continue;
 
-        if(fseek(vault, (long)records[i].data_offset, SEEK_SET) != 0){
+        if(fseeko(vault, (off_t)records[i].data_offset, SEEK_SET) != 0){
             verified = 0;
             break;
         }

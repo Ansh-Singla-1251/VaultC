@@ -10,6 +10,9 @@
 #define MAX_FILES 128
 #define FILE_STREAM_HEADER_SIZE 24
 
+#define VAULT_HEADER_SIZE 158
+#define FILE_RECORD_SIZE 309
+
 typedef struct{
     uint32_t id;
     char name[MAX_FILENAME_LENGTH];
@@ -39,15 +42,11 @@ typedef struct{
 } VaultHeader;
 
 int write_vault_header(FILE *file, const VaultHeader *header);
-
 int read_vault_header(FILE *file, VaultHeader *header);
-
 int validate_vault_header(const VaultHeader *header);
-
+int validate_file_record(const FileRecord *record, const VaultHeader *header);
 int write_file_record(FILE *file, const FileRecord *record);
-
 int read_file_record(FILE *file, FileRecord *record);
-
 int read_file_index(FILE *file, const VaultHeader *header, FileRecord **records);
 
 #endif
