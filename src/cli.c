@@ -17,6 +17,8 @@ void print_usage(void){
     printf("  vault rename <vault> <old> <new>\n");
     printf("  vault search <vault> <query>\n");
     printf("  vault verify <vault>\n");
+    printf("  vault passwd <vault>\n");
+    printf("  vault compact <vault>\n");
 }
 
 int handle_command(int argc, char *argv[]){
@@ -50,6 +52,15 @@ int handle_command(int argc, char *argv[]){
         }
 
         return add_file(argv[2], argv[3]) ? 0 : 1;
+    }
+
+    if(strcmp(argv[1], "compact") == 0){
+        if(argc != 3){
+            print_usage();
+            return 1;
+        }
+
+        return compact_vault(argv[2]) ? 0 : 1;
     }
 
     if(strcmp(argv[1], "extract") == 0){
@@ -105,7 +116,13 @@ int handle_command(int argc, char *argv[]){
 
         return verify_vault(argv[2]) ? 0 : 1;
     }
-
+    if(strcmp(argv[1], "passwd") == 0){
+        if(argc != 3){
+            print_usage();
+            return 1;
+        }
+        return change_password(argv[2]) ? 0 : 1;
+    }
     printf("Unknown command: %s\n", argv[1]);
     print_usage();
 

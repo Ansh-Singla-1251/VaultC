@@ -10,5 +10,7 @@ int verify_vault(const char *path);
 int remove_file(const char *vault_path, const char *filename);
 int rename_file(const char *vault_path, const char *old_name, const char *new_name);
 int search_files(const char *vault_path, const char *query);
+int change_password(const char *path);
+int compact_vault(const char *path);
 
 #endif
