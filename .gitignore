@@ -1,0 +1,21 @@
+# Compiled binaries
+/vault
+/vault.exe
+/vault_sanitize
+/test_storage.exe
+/tests/test_crypto
+/tests/test_file_crypto
+/tests/test_vault
+/tests/test_storage
+
+# Generated test artifacts
+/*.bin
+/*.original
+/*.vlt
+/*.txt
+/test_folder/
+/tests/data/
+
+# Temporary files
+*.tmp
+*.bak

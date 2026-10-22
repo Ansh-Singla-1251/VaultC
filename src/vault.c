@@ -17,6 +17,17 @@
 #include "../include/crypto.h"
 
 static int read_password(const char *prompt, char *password, size_t size){
+    #ifdef VAULT_TESTING
+        static const char test_password[] = "Vault@123";
+
+        (void)prompt;
+
+        if(password == NULL || size < sizeof(test_password))
+            return 0;
+
+        memcpy(password, test_password, sizeof(test_password));
+        return 1;
+    #endif
     struct termios old_settings;
     struct termios new_settings;
 
@@ -41,6 +52,38 @@ static int read_password(const char *prompt, char *password, size_t size){
     printf("\n");
 
     password[strcspn(password, "\n")] = '\0';
+
+    return 1;
+}
+
+static int validate_new_password(const char *password){
+    int has_lowercase = 0;
+    int has_uppercase = 0;
+    int has_digit = 0;
+    int has_symbol = 0;
+
+    if(password == NULL || strlen(password) < 8){
+        printf("Password must contain at least 8 characters.\n");
+        return 0;
+    }
+
+    for(size_t i = 0; password[i] != '\0'; i++){
+        unsigned char c = (unsigned char)password[i];
+
+        if(c >= 'a' && c <= 'z')
+            has_lowercase = 1;
+        else if(c >= 'A' && c <= 'Z')
+            has_uppercase = 1;
+        else if(c >= '0' && c <= '9')
+            has_digit = 1;
+        else if((c >= '!' && c <= '/') || (c >= ':' && c <= '@') || (c >= '[' && c <= '`') || (c >= '{' && c <= '~'))
+            has_symbol = 1;
+    }
+
+    if(!has_lowercase || !has_uppercase || !has_digit || !has_symbol){
+        printf("Password must include lowercase, uppercase, a digit, and a special character.\n");
+        return 0;
+    }
 
     return 1;
 }
@@ -221,13 +264,6 @@ int create_vault(const char *path){
     if(path == NULL)
         return 0;
 
-    file = fopen(path, "wb");
-
-    if(file == NULL){
-        printf("Failed to create vault.\n");
-        return 0;
-    }
-
     memset(&header, 0, sizeof(header));
     memset(&empty_record, 0, sizeof(empty_record));
     memset(password, 0, sizeof(password));
@@ -243,14 +279,11 @@ int create_vault(const char *path){
     header.data_offset = header.index_offset + header.index_size;
     header.file_count = 0;
 
-    if(!read_password("Enter vault password: ", password, sizeof(password))){
-        fclose(file);
+    if(!read_password("Enter vault password: ", password, sizeof(password)))
         return 0;
-    }
 
     if(!read_password("Confirm vault password: ", confirmation, sizeof(confirmation))){
         memset(password, 0, sizeof(password));
-        fclose(file);
         return 0;
     }
 
@@ -258,7 +291,21 @@ int create_vault(const char *path){
         printf("Passwords do not match.\n");
         memset(password, 0, sizeof(password));
         memset(confirmation, 0, sizeof(confirmation));
-        fclose(file);
+        return 0;
+    }
+
+    if(!validate_new_password(password)){
+        memset(password, 0, sizeof(password));
+        memset(confirmation, 0, sizeof(confirmation));
+        return 0;
+    }
+
+    file = fopen(path, "wbx");
+
+    if(file == NULL){
+        printf("Failed to create vault. The path may already exist.\n");
+        memset(password, 0, sizeof(password));
+        memset(confirmation, 0, sizeof(confirmation));
         return 0;
     }
 
@@ -1205,12 +1252,12 @@ int change_password(const char *path){
         return 0;
     }
 
-    if(strlen(new_password) == 0){
-        printf("New password cannot be empty.\n");
+    if(!validate_new_password(new_password)){
         memset(current_password, 0, sizeof(current_password));
         memset(new_password, 0, sizeof(new_password));
         memset(confirmation, 0, sizeof(confirmation));
         memset(current_key, 0, sizeof(current_key));
+        memset(new_key, 0, sizeof(new_key));
         memset(vault_key, 0, sizeof(vault_key));
         fclose(vault);
         return 0;

@@ -24,7 +24,7 @@ $(TEST_FILE_CRYPTO): tests/test_file_crypto.c src/crypto.c
 	$(CC) $(CFLAGS) tests/test_file_crypto.c src/crypto.c $(LIBS) -o $(TEST_FILE_CRYPTO)
 
 $(TEST_VAULT): tests/test_vault.c src/vault.c src/storage.c src/crypto.c
-	$(CC) $(CFLAGS) tests/test_vault.c src/vault.c src/storage.c src/crypto.c $(LIBS) -o $(TEST_VAULT)
+	$(CC) $(CFLAGS) -DVAULT_TESTING tests/test_vault.c src/vault.c src/storage.c src/crypto.c $(LIBS) -o $(TEST_VAULT)
 
 test: $(TEST_CRYPTO) $(TEST_FILE_CRYPTO) $(TEST_VAULT)
 	./$(TEST_CRYPTO)
